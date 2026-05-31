@@ -555,13 +555,31 @@ static int parse_node(parser_t *p, cbm_node_pattern_t *out) {
         out->variable = heap_strdup(advance(p)->text);
     }
 
-    /* Optional :Label */
+    /* Optional :Label, with openCypher label alternation :A|B|C (#242).
+     * Stored as a single "A|B|C" string; the matcher splits on '|'. */
     if (match(p, TOK_COLON)) {
         const cbm_token_t *label = expect(p, TOK_IDENT);
         if (!label) {
             return CBM_NOT_FOUND;
         }
-        out->label = heap_strdup(label->text);
+        char lbuf[CBM_SZ_256];
+        int ll = snprintf(lbuf, sizeof(lbuf), "%s", label->text);
+        while (match(p, TOK_PIPE)) {
+            const cbm_token_t *alt = expect(p, TOK_IDENT);
+            if (!alt) {
+                return CBM_NOT_FOUND;
+            }
+            int w = snprintf(lbuf + ll, (ll < (int)sizeof(lbuf)) ? sizeof(lbuf) - (size_t)ll : 0,
+                             "|%s", alt->text);
+            if (w > 0) {
+                ll += w;
+            }
+            if (ll >= (int)sizeof(lbuf)) {
+                ll = (int)sizeof(lbuf) - SKIP_ONE;
+                break;
+            }
+        }
+        out->label = heap_strdup(lbuf);
     }
 
     /* Optional {props} */
@@ -2316,9 +2334,69 @@ static const char *eval_case_expr(const cbm_case_expr_t *k, binding_t *b) {
 
 /* ── Scan nodes for a pattern ─────────────────────────────────── */
 
+/* True if `actual` matches `pat`, where `pat` may be a '|'-alternation of
+ * labels ("A|B|C") — openCypher label alternation (#242). */
+static bool label_alt_matches(const char *actual, const char *pat) {
+    if (!pat) {
+        return true;
+    }
+    if (!actual) {
+        return false;
+    }
+    if (!strchr(pat, '|')) {
+        return strcmp(actual, pat) == 0;
+    }
+    size_t al = strlen(actual);
+    const char *seg = pat;
+    while (*seg) {
+        const char *bar = strchr(seg, '|');
+        size_t seglen = bar ? (size_t)(bar - seg) : strlen(seg);
+        if (seglen == al && strncmp(seg, actual, seglen) == 0) {
+            return true;
+        }
+        if (!bar) {
+            break;
+        }
+        seg = bar + SKIP_ONE;
+    }
+    return false;
+}
+
+/* Seed nodes for a label alternation "A|B|C": union the per-label results.
+ * Node-struct fields are moved (shallow) into out_nodes; each per-label array
+ * container is freed. */
+static void scan_alternation_labels(cbm_store_t *store, const char *project, const char *labels,
+                                    cbm_node_t **out_nodes, int *out_count) {
+    *out_nodes = NULL;
+    *out_count = 0;
+    int cap = 0;
+    char *copy = heap_strdup(labels);
+    if (!copy) {
+        return;
+    }
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, "|", &save); tok; tok = strtok_r(NULL, "|", &save)) {
+        cbm_node_t *part = NULL;
+        int pc = 0;
+        cbm_store_find_nodes_by_label(store, project, tok, &part, &pc);
+        if (pc > 0 && part) {
+            if (*out_count + pc > cap) {
+                cap = (*out_count + pc) * PAIR_LEN;
+                *out_nodes = safe_realloc(*out_nodes, (size_t)cap * sizeof(cbm_node_t));
+            }
+            memcpy(*out_nodes + *out_count, part, (size_t)pc * sizeof(cbm_node_t));
+            *out_count += pc;
+        }
+        free(part); /* container only — node fields moved to out_nodes */
+    }
+    free(copy);
+}
+
 static void scan_pattern_nodes(cbm_store_t *store, const char *project, int max_rows,
                                cbm_node_pattern_t *first, cbm_node_t **out_nodes, int *out_count) {
-    if (first->label) {
+    if (first->label && strchr(first->label, '|')) {
+        scan_alternation_labels(store, project, first->label, out_nodes, out_count);
+    } else if (first->label) {
         cbm_store_find_nodes_by_label(store, project, first->label, out_nodes, out_count);
     } else {
         cbm_search_params_t params = {.project = project,
@@ -2371,7 +2449,7 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
         if (cbm_store_find_node_by_id(store, tid, &found) != CBM_STORE_OK) {
             continue;
         }
-        if (target_node->label && strcmp(found.label, target_node->label) != 0) {
+        if (target_node->label && !label_alt_matches(found.label, target_node->label)) {
             node_fields_free(&found);
             continue;
         }
@@ -2405,7 +2483,7 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
         if (hop->hop < rel->min_hops) {
             continue;
         }
-        if (target_node->label && strcmp(hop->node.label, target_node->label) != 0) {
+        if (target_node->label && !label_alt_matches(hop->node.label, target_node->label)) {
             continue;
         }
         if (!check_inline_props(&hop->node, target_node->props, target_node->prop_count, store)) {

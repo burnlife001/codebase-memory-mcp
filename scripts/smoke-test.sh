@@ -186,6 +186,16 @@ if [ "$LBL_ROWS" -lt 1 ]; then
 fi
 echo "OK: query_graph WHERE f:Function returned $LBL_ROWS row(s)"
 
+# #242 label alternation — (n:Function|Module) seeds either label.
+CYPHER_ALT=$(cli query_graph "{\"project\":\"$PROJECT\",\"query\":\"MATCH (n:Function|Module) RETURN n.name\"}")
+ALT_ROWS=$(echo "$CYPHER_ALT" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(len(d.get('rows',[])))" 2>/dev/null || echo "0")
+if [ "$ALT_ROWS" -lt 1 ]; then
+  echo "FAIL: query_graph label alternation returned 0 rows"
+  echo "$CYPHER_ALT"
+  exit 1
+fi
+echo "OK: query_graph (n:Function|Module) returned $ALT_ROWS row(s)"
+
 # 3e: delete_project cleanup
 cli delete_project "{\"project\":\"$PROJECT\"}" > /dev/null
 

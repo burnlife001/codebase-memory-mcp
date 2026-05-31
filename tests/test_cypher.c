@@ -802,6 +802,28 @@ TEST(cypher_exec_where_label_test_issue241) {
     PASS();
 }
 
+/* issue #242: openCypher label alternation in MATCH — (n:A|B). */
+TEST(cypher_exec_label_alternation_issue242) {
+    cbm_store_t *s = setup_cypher_store();
+
+    /* Store has 4 Function + 1 Module node → alternation seeds all 5. */
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH (n:Function|Module) RETURN n.name", "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 5);
+    cbm_cypher_result_free(&r);
+
+    /* Alternation with a non-existent label still returns the existing one. */
+    cbm_cypher_result_t r2 = {0};
+    rc = cbm_cypher_execute(s, "MATCH (n:Function|Class) RETURN n.name", "test", 0, &r2);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r2.row_count, 4);
+    cbm_cypher_result_free(&r2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 /* --- Ported from cypher_test.go: TestExecuteInlinePropertyFilter --- */
 TEST(cypher_exec_inline_props) {
     cbm_store_t *s = setup_cypher_store();
@@ -2275,6 +2297,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_distinct);
     RUN_TEST(cypher_exec_with_distinct_issue238);
     RUN_TEST(cypher_exec_where_label_test_issue241);
+    RUN_TEST(cypher_exec_label_alternation_issue242);
     RUN_TEST(cypher_exec_inline_props);
     RUN_TEST(cypher_parse_where_starts_with);
     RUN_TEST(cypher_parse_where_contains);
