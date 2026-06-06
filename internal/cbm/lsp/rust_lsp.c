@@ -4445,10 +4445,10 @@ static void rust_build_registry_from_defs(CBMArena* arena, CBMTypeRegistry* reg,
                         new_arr[existing + 1] = NULL;
                         rt->embedded_types = new_arr;
 
-                        /* Synthesize methods. */
+                        /* Synthesize methods. Bound `mi < 4` BEFORE dereferencing
+                         * methods[mi] so we never read methods[4] (OOB). */
                         for (int mi = 0;
-                             di_entry->methods[mi].short_name &&
-                             mi < 4; mi++) {
+                             mi < 4 && di_entry->methods[mi].short_name; mi++) {
                             const struct DeriveMethod* dm = &di_entry->methods[mi];
                             CBMRegisteredFunc rf;
                             memset(&rf, 0, sizeof(rf));
