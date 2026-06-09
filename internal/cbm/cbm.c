@@ -16,7 +16,8 @@
 #include "foundation/compat.h"
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
-#include <stdint.h> // uint32_t, uint64_t, int64_t
+#include "mimalloc.h" // mi_malloc/mi_calloc/mi_realloc/mi_free — bind ts runtime allocator (#424)
+#include <stdint.h>   // uint32_t, uint64_t, int64_t
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -241,6 +242,22 @@ int cbm_init(void) {
     }
     enum { CBM_INIT_DONE = 1 };
     cbm_initialized = CBM_INIT_DONE;
+    /* Bind the vendored tree-sitter runtime to the SAME allocator the rest of
+     * cbm uses (mimalloc). The runtime otherwise allocates through its
+     * overridable ts_current_malloc/free defaults (plain malloc / free). Under
+     * the production build's MI_OVERRIDE=1 — particularly the Windows
+     * static-MinGW link with --allow-multiple-definition — `malloc` and `free`
+     * can resolve to DIFFERENT allocators (mimalloc vs the CRT), so a subtree
+     * allocated by mimalloc gets freed by the CRT (or vice-versa), corrupting
+     * the heap freelist and crashing mid-parse on a freed (0xffff…) pointer for
+     * large templated C++ headers (#424 — scales with parse churn, not syntax).
+     * Binding explicitly forces ts allocate+free through one allocator on every
+     * platform, eliminating the mismatch class generically. Guarded to the
+     * production build (MI_OVERRIDE=1): the test build is CRT + ASan, where
+     * binding ts to mimalloc would mismatch ASan/CRT frees. */
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+    ts_set_allocator(mi_malloc, mi_calloc, mi_realloc, mi_free);
+#endif
     return 0;
 }
 

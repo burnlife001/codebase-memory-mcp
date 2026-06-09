@@ -58,7 +58,10 @@ CXXFLAGS_COMMON = -std=c++14 -Wall -Wextra -Werror \
                   -I$(CBM_DIR) -I$(TS_INCLUDE)
 
 # Production flags (CFLAGS_EXTRA allows CI to inject -DCBM_VERSION)
-CFLAGS_PROD = $(CFLAGS_COMMON) -O2 $(CFLAGS_EXTRA)
+# CBM_BIND_TS_ALLOCATOR=1: bind the tree-sitter runtime to mimalloc (#424). Only
+# the prod build uses mimalloc (MI_OVERRIDE=1); the test build is CRT+ASan, where
+# binding would create an alloc/free mismatch, so the guard is prod-only.
+CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 $(CFLAGS_EXTRA)
 CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2
 
 # Test flags: debug + sanitizers (override SANITIZE= to disable on Windows)
