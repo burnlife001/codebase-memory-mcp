@@ -391,6 +391,14 @@ static void free_import_map(const char **keys, const char **vals, int count) {
     }
 }
 
+/* True for languages whose module QN derives from the CONTAINING DIRECTORY
+ * (Java/Go package). MUST match cbm_lang_module_is_dir() (internal/cbm/helpers.c)
+ * and pxc_module_is_dir() (pass_lsp_cross.c) so same-module callee resolution
+ * keys against the directory-based def-node QNs in the registry. */
+static bool pp_module_is_dir(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVA || lang == CBM_LANG_GO;
+}
+
 static bool is_checked_exception(const char *name) {
     if (!name) {
         return false;
@@ -2230,7 +2238,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
          * 98.7% hot spot in resolve_file_calls (881 of 893s CPU). */
         cbm_registry_resolve_cache_begin(result->calls.count + result->usages.count + 64);
 
-        char *module_qn = cbm_pipeline_fqn_module(rc->project_name, rel);
+        char *module_qn =
+            cbm_pipeline_fqn_module_dir(rc->project_name, rel, pp_module_is_dir(lang));
 
         /* ── Cross-file LSP (FUSED) ─────────────────────────────
          * Runs BEFORE resolve_file_calls so its additions to

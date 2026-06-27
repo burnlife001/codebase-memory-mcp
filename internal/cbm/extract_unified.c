@@ -338,11 +338,14 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
     if (state->enclosing_class_qn) {
         return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
     }
-    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    /* Java/Go: directory-based module so this enclosing-func QN matches the def
+     * QN and the LSP caller_qn (the lsp_resolve join keys on exact equality). */
+    return cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path, name,
+                                       ctx->language);
 }
 
 // Compute class QN for scope tracking.
-static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node) {
+static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const WalkState *state) {
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
     /* Newer tree-sitter-kotlin: class/object name is a type_identifier child. */
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_KOTLIN) {
@@ -357,7 +360,16 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node) {
         return NULL;
     }
 
-    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    /* Nested class: prefix with the enclosing class QN (Outer.Inner) so this
+     * scope QN matches the def-side class QN (extract_defs.c compute_class_qn /
+     * extract_class_def), which the lsp_resolve join requires for nested types. */
+    if (state && state->enclosing_class_qn) {
+        return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
+    }
+
+    /* Java/Go: directory-based module (see compute_func_qn). */
+    return cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path, name,
+                                       ctx->language);
 }
 
 /* Forward declaration */
@@ -1008,7 +1020,7 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
             push_scope(state, SCOPE_FUNC, depth, fqn);
         }
     } else if (spec->class_node_types && cbm_kind_in_set(node, spec->class_node_types)) {
-        const char *cqn = compute_class_qn(ctx, node);
+        const char *cqn = compute_class_qn(ctx, node, state);
         if (cqn) {
             push_scope(state, SCOPE_CLASS, depth, cqn);
         }

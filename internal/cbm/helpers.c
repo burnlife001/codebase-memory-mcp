@@ -1189,6 +1189,57 @@ char *cbm_fqn_module(CBMArena *a, const char *project, const char *rel_path) {
     return cbm_fqn_compute(a, project, rel_path, NULL);
 }
 
+// True when a language derives its module from the CONTAINING DIRECTORY (Java
+// package, Go package) rather than baking the filename stem into the module QN.
+// For these languages a sibling file in the same dir shares the module, and the
+// type/method name is appended once — so a class `Outer` in `Outer.java` is
+// `proj.Outer`, not `proj.Outer.Outer`, and a method in `myapp/db/conn.go`
+// belongs to module `proj.myapp.db`, not `proj.myapp.db.conn`.
+static bool cbm_lang_module_is_dir(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVA || lang == CBM_LANG_GO;
+}
+
+char *cbm_fqn_module_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                 CBMLanguage lang) {
+    if (!cbm_lang_module_is_dir(lang)) {
+        // All other languages keep the legacy filename-stem module QN.
+        return cbm_fqn_module(a, project, rel_path);
+    }
+    if (!rel_path) {
+        rel_path = "";
+    }
+    // Module is the CONTAINING DIRECTORY: strip the basename (last '/' segment).
+    const char *last_slash = strrchr(rel_path, '/');
+    if (!last_slash) {
+        // Root file: dir is empty → module is just the project.
+        return cbm_fqn_folder(a, project, "");
+    }
+    size_t dir_len = (size_t)(last_slash - rel_path);
+    char *dir = (char *)cbm_arena_alloc(a, dir_len + SKIP_ONE);
+    if (!dir) {
+        return NULL;
+    }
+    memcpy(dir, rel_path, dir_len);
+    dir[dir_len] = '\0';
+    return cbm_fqn_folder(a, project, dir);
+}
+
+char *cbm_fqn_compute_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                  const char *name, CBMLanguage lang) {
+    if (!cbm_lang_module_is_dir(lang)) {
+        // All other languages keep the legacy filename-stem symbol QN.
+        return cbm_fqn_compute(a, project, rel_path, name);
+    }
+    char *module = cbm_fqn_module_source_lang(a, project, rel_path, lang);
+    if (!module) {
+        return NULL;
+    }
+    if (!name || !name[0]) {
+        return module;
+    }
+    return cbm_arena_sprintf(a, "%s.%s", module, name);
+}
+
 char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {
     // project.dir1.dir2
     size_t proj_len = strlen(project);

@@ -2879,7 +2879,11 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    /* Java/Go derive the module from the containing directory (package), so the
+     * filename stem is NOT baked into the QN (Go func in myapp/db/conn.go ->
+     * proj.myapp.db.Func, not proj.myapp.db.conn.Func). Other langs unchanged. */
+    def.qualified_name =
+        cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -2928,7 +2932,10 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
          * is computed the same way (cbm_fqn_compute on the type name). */
         char *recv_type = go_receiver_type_name(a, recv, ctx->source);
         if (recv_type && recv_type[0]) {
-            def.parent_class = cbm_fqn_compute(a, ctx->project, ctx->rel_path, recv_type);
+            /* Must match the Go type node QN (directory-based module) so the
+             * DEFINES_METHOD edge links the method to its owning type. */
+            def.parent_class = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path,
+                                                           recv_type, ctx->language);
         }
     }
 
@@ -3507,12 +3514,15 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         return;
     }
 
-    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner)
+    // For nested classes, prefix with enclosing class QN (e.g., Outer.Inner).
+    // Top-level classes use the language-aware module QN so Java/Go don't double
+    // the filename stem (Java `Outer` in Outer.java -> proj.Outer, not
+    // proj.Outer.Outer); the nested prefix then yields proj.Outer.Inner.
     const char *class_qn;
     if (ctx->enclosing_class_qn) {
         class_qn = cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
     } else {
-        class_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+        class_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     }
     const char *label = class_label_for_kind(kind);
 
@@ -4222,7 +4232,10 @@ static void push_var_def(CBMExtractCtx *ctx, const char *name, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    /* Java/Go: directory-based module (package), so a Go package-level var in
+     * myapp/db/conn.go is proj.myapp.db.Var, matching its siblings. */
+    def.qualified_name =
+        cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Variable";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5439,7 +5452,10 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
             if (saved_enclosing) {
                 return cbm_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
             }
-            return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
+            /* Top-level: language-aware module so Java/Go don't double the
+             * filename stem (matches extract_class_def above). */
+            return cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path, cname,
+                                               ctx->language);
         }
     }
     return saved_enclosing;
