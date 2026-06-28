@@ -2361,6 +2361,78 @@ static const CBMRegisteredFunc *rust_resolve_trait_method(RustLSPContext *ctx,
     return rust_lookup_method_in_trait(ctx, receiver_type_qn, method_name);
 }
 
+// True if `type_qn` implements a trait that declares `method_name` — i.e. a
+// method resolved inherently on the receiver is actually a trait-impl method
+// (lsp_trait_dispatch) rather than a plain inherent one (lsp_method_dispatch).
+// A struct's embedded_types are the traits it implements (the impl-link model
+// rust_resolve_trait_method already relies on), so a declaring trait among them
+// means the method came from `impl Trait for Type`.
+static bool rust_method_is_trait_impl(RustLSPContext *ctx, const char *type_qn,
+                                      const char *method_name) {
+    if (!ctx || !type_qn || !method_name)
+        return false;
+    const CBMRegisteredType *rt = cbm_registry_lookup_type(ctx->registry, type_qn);
+    if (!rt || !rt->embedded_types)
+        return false;
+    for (int i = 0; rt->embedded_types[i]; i++) {
+        if (cbm_registry_lookup_method(ctx->registry, rt->embedded_types[i], method_name))
+            return true;
+    }
+    return false;
+}
+
+// Find the sole concrete implementer of trait `trait_qn` that declares
+// `method_name`, returning that impl's method (NULL if none or 2+), setting
+// *out_n to the count (capped at 2). Used for `Trait::method` UFCS so it
+// resolves to the concrete impl rather than the trait's own abstract method.
+// Matches the embedded (impl-link) entry by full QN OR bare name, since the
+// link is recorded short in some registry entries and fully-qualified in
+// others; dedups implementers by QN.
+static const CBMRegisteredFunc *rust_find_sole_trait_impl(RustLSPContext *ctx, const char *trait_qn,
+                                                          const char *method_name, int *out_n) {
+    if (out_n)
+        *out_n = 0;
+    if (!ctx || !trait_qn || !method_name)
+        return NULL;
+    const CBMTypeRegistry *reg = ctx->registry;
+    const char *tdot = strrchr(trait_qn, '.');
+    const char *tbare = tdot ? tdot + 1 : trait_qn;
+    const CBMRegisteredFunc *first = NULL;
+    const char *first_qn = NULL;
+    int n = 0;
+    for (int ti = 0; ti < reg->type_count && n < 2; ti++) {
+        const CBMRegisteredType *t = &reg->types[ti];
+        if (!t->embedded_types || !t->qualified_name)
+            continue;
+        bool impls = false;
+        for (int j = 0; t->embedded_types[j]; j++) {
+            const char *e = t->embedded_types[j];
+            const char *edot = strrchr(e, '.');
+            const char *ebare = edot ? edot + 1 : e;
+            if (strcmp(e, trait_qn) == 0 || strcmp(ebare, tbare) == 0) {
+                impls = true;
+                break;
+            }
+        }
+        if (!impls)
+            continue;
+        const CBMRegisteredFunc *mf =
+            cbm_registry_lookup_method(reg, t->qualified_name, method_name);
+        if (!mf)
+            continue;
+        if (!first_qn) {
+            first = mf;
+            first_qn = t->qualified_name;
+            n = 1;
+        } else if (strcmp(first_qn, t->qualified_name) != 0) {
+            n = 2;
+        }
+    }
+    if (out_n)
+        *out_n = n;
+    return n == 1 ? first : NULL;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * 8. Macro handling
  * ════════════════════════════════════════════════════════════════════ */
@@ -3465,6 +3537,11 @@ static void rust_resolve_call_expression(RustLSPContext *ctx, TSNode node) {
                 if (m->receiver_type && strcmp(m->receiver_type, type_qn) != 0) {
                     strategy = "lsp_trait_dispatch";
                     conf = (impl_count == 1) ? CBM_RUST_CONF_TRAIT_SOLE : CBM_RUST_CONF_TRAIT_AMB;
+                } else if (rust_method_is_trait_impl(ctx, type_qn, mname)) {
+                    // Inherently resolved, but the method comes from a trait impl
+                    // (`impl Trait for Type`) → polymorphic trait dispatch.
+                    strategy = "lsp_trait_dispatch";
+                    conf = CBM_RUST_CONF_TRAIT_SOLE;
                 }
                 rust_emit_resolved_call(ctx, m->qualified_name, strategy, conf);
                 (void)args_node;
@@ -3593,6 +3670,39 @@ static void rust_resolve_call_expression(RustLSPContext *ctx, TSNode node) {
         if (dot) {
             char *head = cbm_arena_strndup(ctx->arena, qn, (size_t)(dot - qn));
             const char *short_name = dot + 1;
+            /* If `head` is a trait, `Trait::method` UFCS resolves to the sole
+             * concrete impl (lsp_trait_ufcs), NEVER the trait's own abstract
+             * method that the inherent lookup below would find. Resolve the trait
+             * QN (head or module-qualified) via its is_interface flag — set at
+             * type-registration time, so it is reliable even on an early pass
+             * before impl links are wired. When the impl isn't known yet, emit
+             * nothing: a partial-pass lsp_ufcs to the abstract method would
+             * otherwise outrank (higher conf) the real trait_ufcs from the
+             * complete pass and win the join. */
+            const char *trait_qn = NULL;
+            const CBMRegisteredType *head_t = cbm_registry_lookup_type(ctx->registry, head);
+            if (head_t && head_t->is_interface) {
+                trait_qn = head;
+            } else if (ctx->module_qn) {
+                const char *fh = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, head);
+                const CBMRegisteredType *ft = cbm_registry_lookup_type(ctx->registry, fh);
+                if (ft && ft->is_interface)
+                    trait_qn = fh;
+            }
+            if (trait_qn) {
+                int tn = 0;
+                const CBMRegisteredFunc *ti_m =
+                    rust_find_sole_trait_impl(ctx, trait_qn, short_name, &tn);
+                if (tn >= 1) {
+                    rust_emit_resolved_call(
+                        ctx,
+                        ti_m ? ti_m->qualified_name
+                             : cbm_arena_sprintf(ctx->arena, "%s.%s", trait_qn, short_name),
+                        tn == 1 ? "lsp_trait_ufcs" : "lsp_trait_ufcs_amb",
+                        tn == 1 ? CBM_RUST_CONF_TRAIT_SOLE : CBM_RUST_CONF_TRAIT_AMB);
+                }
+                return;
+            }
             const CBMRegisteredFunc *m =
                 cbm_registry_lookup_method_aliased(ctx->registry, head, short_name);
             if (!m && ctx->module_qn) {
