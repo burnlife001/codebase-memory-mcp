@@ -114,6 +114,20 @@ static void teardown_parallel_repo(void) {
 
 /* ── Run sequential pipeline on files, returning gbuf ─────────────── */
 
+/* Free the return-type table pass_calls may have built for a harness-owned
+ * ctx — mirrors the production teardown in pipeline.c; the harness never
+ * runs it, which leaked once the fixture gained typed (Java) methods. The
+ * fixture has no ObjectScript, so no macro table can exist here. */
+static void harness_ctx_free_tables(cbm_pipeline_ctx_t *ctx) {
+    if (ctx->return_type_table) {
+        for (int i = 0; i < ctx->return_type_table->count; i++) {
+            free((void *)ctx->return_type_table->entries[i].return_type);
+        }
+        free((void *)ctx->return_type_table);
+        ctx->return_type_table = NULL;
+    }
+}
+
 static cbm_gbuf_t *run_sequential(const char *project, const char *repo_path,
                                   cbm_file_info_t *files, int file_count) {
     cbm_gbuf_t *gbuf = cbm_gbuf_new(project, repo_path);
@@ -135,6 +149,7 @@ static cbm_gbuf_t *run_sequential(const char *project, const char *repo_path,
     cbm_pipeline_pass_usages(&ctx, files, file_count);
     cbm_pipeline_pass_semantic(&ctx, files, file_count);
 
+    harness_ctx_free_tables(&ctx);
     cbm_registry_free(reg);
     return gbuf;
 }
@@ -207,6 +222,7 @@ static cbm_gbuf_t *run_parallel_with_extract_opts(const char *project, const cha
             cbm_free_result(result_cache[i]);
     free(result_cache);
 
+    harness_ctx_free_tables(&ctx);
     cbm_registry_free(reg);
     return gbuf;
 }
