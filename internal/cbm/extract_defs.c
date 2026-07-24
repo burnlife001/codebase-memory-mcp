@@ -3923,6 +3923,26 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
             char *dk_text = cbm_node_text(a, dk, ctx->source);
             if (dk_text && strcmp(dk_text, "struct") == 0) {
                 label = "Struct";
+            } else if (dk_text && strcmp(dk_text, "enum") == 0) {
+                // enum → "Enum" (type-like via cbm_label_is_type_like), so the
+                // graph distinguishes Swift type kinds (codegraph parity). (WS2b)
+                label = "Enum";
+            } else if (dk_text && strcmp(dk_text, "actor") == 0) {
+                // actor → "Actor" (added to cbm_label_is_type_like, so all
+                // type-resolution consumers route it like Class). (WS2b)
+                label = "Actor";
+            } else if (dk_text && strcmp(dk_text, "extension") == 0) {
+                /* An `extension` parses as class_declaration whose `name` is the
+                 * EXTENDED type, sharing that type's FQN. Pushing a type def here would
+                 * CLOBBER the real type's label via the UNIQUE(project,qualified_name)
+                 * last-write-wins upsert (e.g. `struct X{}` then `extension X:P{}` →
+                 * X relabeled back to Class) and phantom-node a type defined elsewhere.
+                 * Extract its members (they attach to the extended type's QN) but emit
+                 * NO type def for the extension itself. (WS2b review fix) */
+                extract_class_methods(ctx, node, class_qn, spec);
+                extract_class_fields(ctx, node, class_qn, spec);
+                extract_class_variables(ctx, node, spec);
+                return;
             }
         }
     }
