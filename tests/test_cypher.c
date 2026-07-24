@@ -3016,6 +3016,47 @@ TEST(cypher_multi_prop_projection_no_alias) {
     PASS();
 }
 
+/* M2-b1 regression: a non-aggregate function (type(r)) mixed with an aggregate
+ * (count(*)) must become a GROUPING dimension — one row per distinct edge type —
+ * not collapse every row into a single group. setup_cypher_store has 3 CALLS + 1
+ * DEFINES edge, so the correct result is 2 rows (CALLS=3, DEFINES=1); the bug
+ * produced a single collapsed row. */
+TEST(cypher_exec_type_aggregation_groups_per_type) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+
+    int rc = cbm_cypher_execute(s, "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c", "test", 0,
+                                &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NULL(r.error);
+    ASSERT_EQ(r.col_count, 2);
+    /* CRITICAL: >=2 rows (one per edge type). Pre-fix this was 1 (collapsed). */
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.columns[0], "t");
+    ASSERT_STR_EQ(r.columns[1], "c");
+
+    bool has_calls = false, has_defines = false;
+    for (int i = 0; i < r.row_count; i++) {
+        const char *type_val = r.rows[i][0];
+        const char *count_val = r.rows[i][1];
+        ASSERT_NOT_NULL(type_val);
+        ASSERT_NOT_NULL(count_val);
+        if (strcmp(type_val, "CALLS") == 0) {
+            has_calls = true;
+            ASSERT_STR_EQ(count_val, "3");
+        } else if (strcmp(type_val, "DEFINES") == 0) {
+            has_defines = true;
+            ASSERT_STR_EQ(count_val, "1");
+        }
+    }
+    ASSERT(has_calls);
+    ASSERT(has_defines);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* Result projection writes into fixed-width per-row stack arrays
  * (vals[CBM_SZ_32] / func_bufs[CBM_SZ_32][…] in execute_return_simple and its
  * siblings), indexed by the parsed RETURN item count. The parser must bound
@@ -3332,6 +3373,8 @@ SUITE(cypher) {
     /* Phase 9: UNWIND */
     RUN_TEST(cypher_parse_unwind);
     RUN_TEST(cypher_parse_unwind_var);
+    /* M2-b1: non-aggregate function grouping (type(r)) */
+    RUN_TEST(cypher_exec_type_aggregation_groups_per_type);
     RUN_TEST(cypher_wide_return_projection_bounded);
     /* Composite property projection (arrays/objects, escaped quotes) */
     RUN_TEST(cypher_exec_prop_array_with_internal_commas);
