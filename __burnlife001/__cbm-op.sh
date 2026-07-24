@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null 2>&1 && pwd -P)"
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # ── Configurable remotes ─────────────────────────────────────────────────────
@@ -19,60 +19,24 @@ yellow() { echo -e "\033[33m$*\033[0m"; }
 cyan()   { echo -e "\033[36m$*\033[0m"; }
 
 # ── Sync upstream ────────────────────────────────────────────────────────────
+# Delegates the full sync workflow (fetch → merge → push → rebase, with stash
+# handling and conflict recovery) to scripts/sync-upstream-menu.sh via its
+# `sync` CLI shortcut. We keep only the project-specific auto-add-upstream
+# behavior here so the menu "just works" on a fresh clone.
 sync_upstream() {
-  # 1. Check upstream remote exists, auto-add if missing
+  local sync_script="$REPO_ROOT/scripts/sync-upstream-menu.sh"
+  if [ ! -f "$sync_script" ]; then
+    red "[sync] missing script: $sync_script"
+    return 1
+  fi
+
+  # Project-specific: auto-add upstream if missing.
   if ! git remote get-url "$UPSTREAM_REMOTE" > /dev/null 2>&1; then
     yellow "Remote '$UPSTREAM_REMOTE' not found. Adding..."
     git remote add "$UPSTREAM_REMOTE" git@github.com:DeusData/codebase-memory-mcp.git
   fi
 
-  # 2. Check origin remote exists
-  if ! git remote get-url "$ORIGIN_REMOTE" > /dev/null 2>&1; then
-    red "Error: remote '$ORIGIN_REMOTE' not found."
-    return 1
-  fi
-
-  # 3. Stash if worktree is dirty (tracked changes only; untracked files are inert)
-  local stashed=false
-  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    yellow "Worktree is dirty. Stashing changes..."
-    git stash push -m "auto: stash before sync $(date '+%Y-%m-%d %H:%M:%S')"
-    stashed=true
-  fi
-
-  # 4. Remember original branch
-  local original_branch
-  original_branch="$(git rev-parse --abbrev-ref HEAD)"
-
-  # 5. Checkout main, fetch upstream, merge
-  echo "[1/4] Fetching $UPSTREAM_REMOTE..."
-  git fetch "$UPSTREAM_REMOTE"
-
-  echo "[2/4] Checking out main and merging $UPSTREAM_REMOTE/main..."
-  git checkout main
-  git merge "$UPSTREAM_REMOTE/main" --no-edit
-
-  # 6. Push to origin
-  echo "[3/4] Pushing to $ORIGIN_REMOTE..."
-  git push "$ORIGIN_REMOTE" main
-
-  # 7. Checkout original branch and rebase onto main
-  echo "[4/4] Rebasing $original_branch onto main..."
-  git checkout "$original_branch"
-  if ! git rebase main; then
-    red "Rebase failed. Resolve conflicts, then run:"
-    echo "  git rebase --continue"
-    echo "  git stash pop  (if you had stashed changes)"
-    return 1
-  fi
-
-  # 8. Pop stash if we stashed
-  if [ "$stashed" = true ]; then
-    echo "Restoring stashed changes..."
-    git stash pop
-  fi
-
-  green "Sync complete."
+  bash "$sync_script" sync
 }
 
 # ── Build exe ────────────────────────────────────────────────────────────────
